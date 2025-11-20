@@ -25,6 +25,11 @@ if not image_files:
     exit()
 
 # -----------------------------
+# ENSURE OUTPUT FOLDER EXISTS
+# -----------------------------
+Path(OUTPUT_FOLDER).mkdir(parents=True, exist_ok=True)
+
+# -----------------------------
 # RUN PREDICTIONS
 # -----------------------------
 for img_path in image_files:
