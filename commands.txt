@@ -1,0 +1,6 @@
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+yolo detect train data="3D Printer Spaghetti Detection.v1i.yolov8\data.yaml" model=yolo11n.pt epochs=50 imgsz=640
+
+yolo detect predict model="weights\best.pt" source="images\test.jpeg" project="predictions" name="prediction" exist_ok=True
+
