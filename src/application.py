@@ -5,6 +5,8 @@ from PIL import Image, ImageTk
 import sys
 from ultralytics import YOLO
 import requests
+import json
+from pathlib import Path
 
 # -----------------------------
 # Load YOLO model ONCE
@@ -13,10 +15,25 @@ MODEL_PATH = "../weights/best.pt"
 model = YOLO(MODEL_PATH)
 
 # -----------------------------
+# Persistent printers storage
+# -----------------------------
+PRINTERS_FILE = "printers.json"
+
+def load_printers():
+    if Path(PRINTERS_FILE).exists():
+        with open(PRINTERS_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_printers(printers_dict):
+    with open(PRINTERS_FILE, "w") as f:
+        json.dump(printers_dict, f, indent=2)
+
+# -----------------------------
 # Printer configuration popup
 # -----------------------------
 class PrinterConfigPopup:
-    def __init__(self, parent, cam_index, callback):
+    def __init__(self, parent, cam_index, callback, name="", ip=""):
         self.top = tk.Toplevel(parent)
         self.top.title(f"Printer config for Camera {cam_index}")
         self.callback = callback
@@ -24,10 +41,12 @@ class PrinterConfigPopup:
         tk.Label(self.top, text="Printer Name:").pack(pady=5)
         self.name_entry = tk.Entry(self.top)
         self.name_entry.pack()
+        self.name_entry.insert(0, name)
 
         tk.Label(self.top, text="Printer IP:").pack(pady=5)
         self.ip_entry = tk.Entry(self.top)
         self.ip_entry.pack()
+        self.ip_entry.insert(0, ip)
 
         tk.Button(self.top, text="Save", command=self.save).pack(pady=10)
 
@@ -49,13 +68,14 @@ class PrinterConfigPopup:
         else:
             messagebox.showwarning("Missing info", "Please enter both Name and IP")
 
-# -------------------------------------------------------
-# Camera feed tab class WITH controls
-# -------------------------------------------------------
+# -----------------------------
+# Camera feed tab class WITH YOLO and printer controls
+# -----------------------------
 class CameraTab:
-    def __init__(self, notebook, cam_index, printer_info=None):
+    def __init__(self, notebook, cam_index, printer_info=None, printers_dict=None):
         self.cam_index = cam_index
         self.printer_info = printer_info
+        self.printers_dict = printers_dict
 
         self.cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
 
@@ -71,6 +91,10 @@ class CameraTab:
                                            command=self.terminate_print)
         self.terminate_button.pack(pady=10)
 
+        self.edit_button = ttk.Button(self.control_frame, text="Edit Printer",
+                                      command=self.edit_printer)
+        self.edit_button.pack(pady=10)
+
         self.conf_label = ttk.Label(self.control_frame, text="Max Confidence: 0%")
         self.conf_label.pack(pady=10)
 
@@ -78,21 +102,38 @@ class CameraTab:
         self.status_canvas.pack(pady=5)
         self.status_circle = self.status_canvas.create_oval(2, 2, 18, 18, fill="green")
 
-        # Camera feed frame (fixed size)
+        # Camera feed on right
+        self.camera_frame = ttk.Frame(self.frame)
+        self.camera_frame.pack(side="right", fill="both", expand=True)
+
+        # Fix label size to prevent shaking
         self.display_width = 800
         self.display_height = 600
-        self.camera_frame = ttk.Frame(self.frame, width=self.display_width, height=self.display_height)
-        self.camera_frame.pack(side="right", fill="both", expand=True)
-        self.camera_frame.pack_propagate(False)
+        self.label = tk.Label(self.camera_frame, width=self.display_width, height=self.display_height)
+        self.label.pack(expand=True)
 
-        # Canvas for video (avoids jitter)
-        self.camera_canvas = tk.Canvas(self.camera_frame, width=self.display_width, height=self.display_height)
-        self.camera_canvas.pack()
-        self.camera_canvas_img = None  # canvas image reference
+        # Store latest annotated frame
+        self.latest_frame = None
 
-        self.update_frame()
+        # Start loops
+        self.update_video_frame()
+        self.run_detection()  # runs every 1000ms
 
-    def update_frame(self):
+    def update_video_frame(self):
+        """Update video feed every frame (~15ms)"""
+        ret, frame = self.cap.read()
+        if ret:
+            display_frame = self.latest_frame if self.latest_frame is not None else frame
+            display_frame = cv2.resize(display_frame, (self.display_width, self.display_height))
+            rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(rgb)
+            imgtk = ImageTk.PhotoImage(image=img)
+            self.label.imgtk = imgtk
+            self.label.config(image=imgtk)
+        self.label.after(15, self.update_video_frame)
+
+    def run_detection(self):
+        """Run YOLO detection every 1 second"""
         ret, frame = self.cap.read()
         if ret:
             results = model.predict(frame, imgsz=640, verbose=False)
@@ -108,19 +149,9 @@ class CameraTab:
             self.conf_label.config(text=f"Max Confidence: {max_conf*100:.1f}%")
             self.status_canvas.itemconfig(self.status_circle, fill="red" if max_conf >= 0.85 else "green")
 
-            # Resize annotated frame to canvas size
-            annotated = cv2.resize(annotated, (self.display_width, self.display_height))
-            rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(rgb)
-            self.imgtk = ImageTk.PhotoImage(image=img)
+            self.latest_frame = annotated  # save for smooth video display
 
-            if self.camera_canvas_img is None:
-                self.camera_canvas_img = self.camera_canvas.create_image(0, 0, anchor="nw", image=self.imgtk)
-            else:
-                self.camera_canvas.itemconfig(self.camera_canvas_img, image=self.imgtk)
-
-        # Schedule next frame (~30 FPS)
-        self.camera_canvas.after(33, self.update_frame)
+        self.label.after(1000, self.run_detection)
 
     def terminate_print(self):
         if not self.printer_info:
@@ -145,16 +176,29 @@ class CameraTab:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to terminate print: {e}")
 
-# -------------------------------------------------------
+    def edit_printer(self):
+        def save_new(name, ip):
+            self.printer_info["name"] = name
+            self.printer_info["ip"] = ip
+            self.printers_dict[self.cam_index] = self.printer_info
+            save_printers(self.printers_dict)
+            tab_index = self.frame.master.index(self.frame)
+            self.frame.master.tab(tab_index, text=name)
+
+        PrinterConfigPopup(self.frame, self.cam_index, save_new,
+                           name=self.printer_info.get("name", ""),
+                           ip=self.printer_info.get("ip", ""))
+
+# -----------------------------
 # Main App
-# -------------------------------------------------------
+# -----------------------------
 class App:
     def __init__(self, root, camera_count):
         self.root = root
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(fill="both", expand=True)
 
-        self.printers = {}  # store printer info per camera
+        self.printers = load_printers()  # Load saved printers
 
         # Home tab
         self.home_tab = ttk.Frame(self.notebook)
@@ -183,17 +227,46 @@ class App:
                           text=f"Camera {i} not found",
                           foreground="red").pack()
 
+
     def open_camera(self, cam_index):
-        # Ask for printer info first
-        def save_printer(name, ip):
-            self.printers[cam_index] = {"name": name, "ip": ip}
-            CameraTab(self.notebook, cam_index, printer_info=self.printers[cam_index])
+        key = str(cam_index)  # convert to string to match JSON
+        if key in self.printers:
+            # Auto open with saved printer info
+            CameraTab(self.notebook, cam_index,
+                    printer_info=self.printers[key],
+                    printers_dict=self.printers)
+        else:
+            def save_printer(name, ip):
+                self.printers[key] = {"name": name, "ip": ip}  # store with string key
+                save_printers(self.printers)
+                CameraTab(self.notebook, cam_index,
+                        printer_info=self.printers[key],
+                        printers_dict=self.printers)
 
-        PrinterConfigPopup(self.root, cam_index, save_printer)
+            PrinterConfigPopup(self.root, cam_index, save_printer)
 
-# -------------------------------------------------------
+
+    # def open_camera(self, cam_index):
+    #     if cam_index in self.printers:
+    #         # Auto open with saved printer info
+    #         CameraTab(self.notebook, cam_index,
+    #                   printer_info=self.printers[cam_index],
+    #                   printers_dict=self.printers)
+    #     else:
+    #         def save_printer(name, ip):
+    #             self.printers[cam_index] = {"name": name, "ip": ip}
+    #             save_printers(self.printers)
+    #             CameraTab(self.notebook, cam_index,
+    #                       printer_info=self.printers[cam_index],
+    #                       printers_dict=self.printers)
+
+    #         PrinterConfigPopup(self.root, cam_index, save_printer)
+    
+    
+
+# -----------------------------
 # Program start
-# -------------------------------------------------------
+# -----------------------------
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         print("Usage: python app.py <camera_count>")
@@ -202,9 +275,16 @@ if __name__ == "__main__":
     camera_count = int(sys.argv[1])
 
     root = tk.Tk()
-    root.title("YOLO Multi-Camera Viewer")
+    root.title("YOLO Multi-Camera Viewer with Printer Control")
     root.geometry("1200x800")
 
     app = App(root, camera_count)
+
+    # Ensure printers are saved on app close
+    def on_close():
+        save_printers(app.printers)
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
 
     root.mainloop()
