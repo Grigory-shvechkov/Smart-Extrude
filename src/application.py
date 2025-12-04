@@ -190,10 +190,8 @@ class CameraTab:
                             max_conf = confidence
                 self.latest_frame = annotated
                 self.max_conf = max_conf
-                # Update GUI
                 self.label.after(0, self.update_status)
 
-                # Auto terminate using confirmed threshold
                 if self.auto_terminate.get() and max_conf >= self.confirmed_threshold:
                     self.terminated_due_threshold = True
                     self.label.after(0, self.auto_terminate_print)
@@ -262,31 +260,47 @@ class App:
         self.notebook.pack(fill="both", expand=True)
         self.printers = load_printers()
         self.tabs = []
+        self.camera_count = camera_count
 
         # Home tab
         self.home_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.home_tab, text="Home")
         ttk.Label(self.home_tab, text="Available Cameras", font=("Arial", 14)).pack(pady=10)
 
+        self.camera_frame = ttk.Frame(self.home_tab)
+        self.camera_frame.pack()
+
         self.add_camera_buttons(camera_count)
 
-        self.reset_button = ttk.Button(self.home_tab, text="Reset Printer Data", command=self.reset_data)
-        self.reset_button.pack(pady=20)
+        # Bottom buttons
+        self.bottom_frame = ttk.Frame(self.home_tab)
+        self.bottom_frame.pack(pady=20)
+        self.reset_button = ttk.Button(self.bottom_frame, text="Reset Printer Data", command=self.reset_data)
+        self.reset_button.pack(side="left", padx=10)
+        self.refresh_button = ttk.Button(self.bottom_frame, text="Refresh Cameras", command=self.refresh_cameras)
+        self.refresh_button.pack(side="left", padx=10)
 
     def add_camera_buttons(self, camera_count):
+        for widget in self.camera_frame.winfo_children():
+            widget.destroy()
         for i in range(camera_count):
+            if any(tab.cam_index == i for tab in self.tabs):
+                continue
             cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
             ok, _ = cap.read()
             cap.release()
             if ok:
                 button = ttk.Button(
-                    self.home_tab,
+                    self.camera_frame,
                     text=f"Open Camera {i}",
                     command=lambda cam=i: self.open_camera(cam)
                 )
                 button.pack(pady=5)
             else:
-                ttk.Label(self.home_tab, text=f"Camera {i} not found", foreground="red").pack()
+                ttk.Label(self.camera_frame, text=f"Camera {i} not found", foreground="red").pack()
+
+    def refresh_cameras(self):
+        self.add_camera_buttons(self.camera_count)
 
     def open_camera(self, cam_index):
         key = str(cam_index)
@@ -317,6 +331,7 @@ class App:
                 tab.stop()
             self.tabs.clear()
             messagebox.showinfo("Reset", "All printer data cleared and tabs closed.")
+            self.add_camera_buttons(self.camera_count)
 
 # -----------------------------
 # Program start
