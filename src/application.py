@@ -59,7 +59,7 @@ class PrinterConfigPopup:
         self.top.transient(parent)
         self.top.grab_set()
         parent.update_idletasks()
-        w, h = 300, 150
+        w, h = 300, 180
         x = parent.winfo_rootx() + (parent.winfo_width() - w)//2
         y = parent.winfo_rooty() + (parent.winfo_height() - h)//2
         self.top.geometry(f"{w}x{h}+{x}+{y}")
@@ -74,7 +74,7 @@ class PrinterConfigPopup:
             messagebox.showwarning("Missing info", "Please enter both Name and IP")
 
 # -----------------------------
-# Camera feed tab class
+# Camera tab class
 # -----------------------------
 class CameraTab:
     def __init__(self, notebook, cam_index, printer_info=None, printers_dict=None):
@@ -84,35 +84,50 @@ class CameraTab:
 
         self.cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
         self.running = True
-
-        self.current_frame = None       # raw frame from camera
-        self.annotated_frame = None     # frame with YOLO annotations
+        self.latest_frame = None
         self.max_conf = 0
+        self.print_active = True
 
         tab_title = printer_info.get("name") if printer_info else f"Camera {cam_index}"
         self.frame = ttk.Frame(notebook)
         notebook.add(self.frame, text=tab_title)
 
         # Left control panel
-        self.control_frame = ttk.Frame(self.frame, width=200)
+        self.control_frame = ttk.Frame(self.frame, width=220)
         self.control_frame.pack(side="left", fill="y", padx=5, pady=5)
 
         self.terminate_button = ttk.Button(self.control_frame, text="Terminate Print",
                                            command=self.terminate_print)
-        self.terminate_button.pack(pady=10)
+        self.terminate_button.pack(pady=5)
 
         self.edit_button = ttk.Button(self.control_frame, text="Edit Printer",
                                       command=self.edit_printer)
-        self.edit_button.pack(pady=10)
+        self.edit_button.pack(pady=5)
+
+        # Auto terminate
+        self.auto_var = tk.BooleanVar(value=False)
+        self.auto_check = ttk.Checkbutton(self.control_frame, text="Auto Terminate", variable=self.auto_var)
+        self.auto_check.pack(pady=5)
+
+        tk.Label(self.control_frame, text="Threshold:").pack()
+        self.threshold_var = tk.DoubleVar(value=0.85)
+        self.threshold_entry = ttk.Entry(self.control_frame, textvariable=self.threshold_var)
+        self.threshold_entry.pack(pady=2)
+
+        self.status_label = ttk.Label(self.control_frame, text="Print Status: Active")
+        self.status_label.pack(pady=5)
 
         self.conf_label = ttk.Label(self.control_frame, text="Max Confidence: 0%")
-        self.conf_label.pack(pady=10)
+        self.conf_label.pack(pady=5)
 
         self.status_canvas = tk.Canvas(self.control_frame, width=20, height=20)
         self.status_canvas.pack(pady=5)
         self.status_circle = self.status_canvas.create_oval(2, 2, 18, 18, fill="green")
 
-        # Camera feed on right
+        self.restart_button = ttk.Button(self.control_frame, text="Restart Detection", command=self.restart_detection)
+        self.restart_button.pack(pady=10)
+
+        # Camera feed
         self.camera_frame = ttk.Frame(self.frame)
         self.camera_frame.pack(side="right", fill="both", expand=True)
 
@@ -121,28 +136,32 @@ class CameraTab:
         self.label = tk.Label(self.camera_frame, width=self.display_width, height=self.display_height)
         self.label.pack(expand=True)
 
-        # Start threads
-        threading.Thread(target=self.frame_capture_loop, daemon=True).start()
-        threading.Thread(target=self.yolo_loop, daemon=True).start()
         self.update_video_frame()
+        threading.Thread(target=self.run_detection_loop, daemon=True).start()
 
-    def frame_capture_loop(self):
-        """Continuously capture frames from camera"""
+    def update_video_frame(self):
+        ret, frame = self.cap.read()
+        if ret:
+            display_frame = self.latest_frame if self.latest_frame is not None else frame
+            display_frame = cv2.resize(display_frame, (self.display_width, self.display_height))
+            rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(rgb)
+            imgtk = ImageTk.PhotoImage(image=img)
+            self.label.imgtk = imgtk
+            self.label.config(image=imgtk)
+        if self.running:
+            self.label.after(15, self.update_video_frame)
+
+    def run_detection_loop(self):
         while self.running:
+            if not self.print_active:
+                time.sleep(0.05)
+                continue
+
             ret, frame = self.cap.read()
             if ret:
-                self.current_frame = frame
-            else:
-                time.sleep(0.01)
-
-    def yolo_loop(self):
-        """Continuously run YOLO on the latest frame"""
-        while self.running:
-            if self.current_frame is not None:
-                frame_copy = self.current_frame.copy()
-                results = model.predict(frame_copy, imgsz=640, verbose=False)
-                annotated = results[0].plot() if results else frame_copy
-
+                results = model.predict(frame, imgsz=640, verbose=False)
+                annotated = results[0].plot() if results else frame
                 max_conf = 0
                 if results and results[0].boxes:
                     for box in results[0].boxes:
@@ -150,49 +169,48 @@ class CameraTab:
                         if confidence > max_conf:
                             max_conf = confidence
 
-                self.annotated_frame = annotated
+                self.latest_frame = annotated
                 self.max_conf = max_conf
-
-                # Update GUI safely
                 self.label.after(0, self.update_status)
-            else:
-                time.sleep(0.01)
 
-    def update_video_frame(self):
-        """Display latest annotated frame or raw frame"""
-        if self.running:
-            frame_to_show = self.annotated_frame if self.annotated_frame is not None else self.current_frame
-            if frame_to_show is not None:
-                resized = cv2.resize(frame_to_show, (self.display_width, self.display_height))
-                rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-                img = Image.fromarray(rgb)
-                imgtk = ImageTk.PhotoImage(image=img)
-                self.label.imgtk = imgtk
-                self.label.config(image=imgtk)
-            self.label.after(15, self.update_video_frame)  # ~60 FPS
+                # Auto terminate check
+                if self.auto_var.get() and self.print_active:
+                    try:
+                        threshold = float(self.threshold_var.get())
+                    except ValueError:
+                        threshold = 0.85
+                    if max_conf >= threshold:
+                        self.label.after(0, self.auto_terminate)
+
+            time.sleep(0.02)
 
     def update_status(self):
         self.conf_label.config(text=f"Max Confidence: {self.max_conf*100:.1f}%")
         self.status_canvas.itemconfig(self.status_circle, fill="red" if self.max_conf >= 0.85 else "green")
+        status_text = "Active" if self.print_active else "Terminated"
+        self.status_label.config(text=f"Print Status: {status_text}")
 
-    def terminate_print(self):
+    def auto_terminate(self):
+        self.print_active = False
+        self.terminate_print(auto=True)
+        messagebox.showinfo("Auto Terminate", f"Print terminated automatically for Camera {self.cam_index}")
+
+    def terminate_print(self, auto=False):
         if not self.printer_info:
             messagebox.showerror("Error", "Printer info not set for this camera.")
             return
-
         printer_ip = self.printer_info.get("ip")
         if not printer_ip:
             messagebox.showerror("Error", "Printer IP missing.")
             return
-
         url = f"http://{printer_ip}/api/job"
         headers = {"Content-Type": "application/json"}
         payload = {"command": "cancel"}
-
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=5)
             if response.status_code in [200, 204]:
-                messagebox.showinfo("Success", f"Print terminated on {self.printer_info.get('name')}")
+                if not auto:
+                    messagebox.showinfo("Success", f"Print terminated on {self.printer_info.get('name')}")
             else:
                 messagebox.showerror("Failed", f"Printer responded with status {response.status_code}")
         except Exception as e:
@@ -206,10 +224,15 @@ class CameraTab:
             save_printers(self.printers_dict)
             tab_index = self.frame.master.index(self.frame)
             self.frame.master.tab(tab_index, text=name)
-
         PrinterConfigPopup(self.frame, self.cam_index, save_new,
                            name=self.printer_info.get("name", ""),
                            ip=self.printer_info.get("ip", ""))
+
+    def restart_detection(self):
+        self.print_active = True
+        self.latest_frame = None
+        self.max_conf = 0
+        self.update_status()
 
     def stop(self):
         self.running = False
@@ -230,9 +253,12 @@ class App:
         # Home tab
         self.home_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.home_tab, text="Home")
-        ttk.Label(self.home_tab, text="Available Cameras", font=("Arial", 14)).pack(pady=10)
 
+        ttk.Label(self.home_tab, text="Available Cameras", font=("Arial", 14)).pack(pady=10)
         self.add_camera_buttons(camera_count)
+
+        reset_button = ttk.Button(self.home_tab, text="Reset Data", command=self.reset_data)
+        reset_button.pack(side="bottom", pady=10)
 
     def add_camera_buttons(self, camera_count):
         for i in range(camera_count):
@@ -240,27 +266,49 @@ class App:
             ok, _ = cap.read()
             cap.release()
             if ok:
-                button = ttk.Button(self.home_tab, text=f"Open Camera {i}", command=lambda cam=i: self.open_camera(cam))
+                button = ttk.Button(self.home_tab, text=f"Open Camera {i}",
+                                    command=lambda cam=i: self.open_camera(cam))
                 button.pack(pady=5)
             else:
                 ttk.Label(self.home_tab, text=f"Camera {i} not found", foreground="red").pack()
 
     def open_camera(self, cam_index):
         key = str(cam_index)
+        for tab in self.tabs:
+            if tab.cam_index == cam_index:
+                # Switch to existing tab
+                index = self.notebook.index(tab.frame)
+                self.notebook.select(index)
+                return
+
         if key in self.printers:
-            tab = CameraTab(self.notebook, cam_index, printer_info=self.printers[key], printers_dict=self.printers)
+            tab = CameraTab(self.notebook, cam_index,
+                            printer_info=self.printers[key],
+                            printers_dict=self.printers)
             self.tabs.append(tab)
+            self.notebook.select(self.notebook.index(tab.frame))
         else:
             def save_printer(name, ip):
                 self.printers[key] = {"name": name, "ip": ip}
                 save_printers(self.printers)
-                tab = CameraTab(self.notebook, cam_index, printer_info=self.printers[key], printers_dict=self.printers)
+                tab = CameraTab(self.notebook, cam_index,
+                                printer_info=self.printers[key],
+                                printers_dict=self.printers)
                 self.tabs.append(tab)
+                self.notebook.select(self.notebook.index(tab.frame))
             PrinterConfigPopup(self.root, cam_index, save_printer)
 
     def stop_all_tabs(self):
         for tab in self.tabs:
             tab.stop()
+        self.tabs.clear()
+
+    def reset_data(self):
+        if messagebox.askyesno("Confirm Reset", "Are you sure you want to reset all printer data?"):
+            self.printers = {}
+            save_printers(self.printers)
+            self.stop_all_tabs()
+            messagebox.showinfo("Reset Complete", "All printer data has been reset.")
 
 # -----------------------------
 # Program start
@@ -271,6 +319,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     camera_count = int(sys.argv[1])
+
     root = tk.Tk()
     root.title("YOLO Multi-Camera Viewer with Printer Control")
     root.geometry("1200x800")
