@@ -50,7 +50,7 @@ class PrinterConfigPopup:
             messagebox.showwarning("Missing info", "Please enter both Name and IP")
 
 # -------------------------------------------------------
-# Camera feed tab class WITH YOLO + Terminate Print
+# Camera feed tab class WITH controls
 # -------------------------------------------------------
 class CameraTab:
     def __init__(self, notebook, cam_index, printer_info=None):
@@ -59,51 +59,68 @@ class CameraTab:
 
         self.cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
 
-        # Use printer name as tab title
         tab_title = printer_info.get("name") if printer_info else f"Camera {cam_index}"
         self.frame = ttk.Frame(notebook)
         notebook.add(self.frame, text=tab_title)
 
-        # Camera feed label (centered)
-        self.label = tk.Label(self.frame)
-        self.label.pack(expand=True, anchor="center", padx=10, pady=10)
+        # Left control panel
+        self.control_frame = ttk.Frame(self.frame, width=200)
+        self.control_frame.pack(side="left", fill="y", padx=5, pady=5)
 
-        # Terminate Print button
-        self.terminate_button = ttk.Button(self.frame, text="Terminate Print",
+        self.terminate_button = ttk.Button(self.control_frame, text="Terminate Print",
                                            command=self.terminate_print)
-        self.terminate_button.pack(pady=5)
+        self.terminate_button.pack(pady=10)
 
-        # Desired display size (can be adjusted)
+        self.conf_label = ttk.Label(self.control_frame, text="Max Confidence: 0%")
+        self.conf_label.pack(pady=10)
+
+        self.status_canvas = tk.Canvas(self.control_frame, width=20, height=20)
+        self.status_canvas.pack(pady=5)
+        self.status_circle = self.status_canvas.create_oval(2, 2, 18, 18, fill="green")
+
+        # Camera feed frame (fixed size)
         self.display_width = 800
         self.display_height = 600
+        self.camera_frame = ttk.Frame(self.frame, width=self.display_width, height=self.display_height)
+        self.camera_frame.pack(side="right", fill="both", expand=True)
+        self.camera_frame.pack_propagate(False)
+
+        # Canvas for video (avoids jitter)
+        self.camera_canvas = tk.Canvas(self.camera_frame, width=self.display_width, height=self.display_height)
+        self.camera_canvas.pack()
+        self.camera_canvas_img = None  # canvas image reference
 
         self.update_frame()
 
     def update_frame(self):
         ret, frame = self.cap.read()
         if ret:
-            # Run YOLO
             results = model.predict(frame, imgsz=640, verbose=False)
             annotated = results[0].plot() if results else frame
 
-            # Print detections
+            max_conf = 0
             if results and results[0].boxes:
                 for box in results[0].boxes:
-                    cls_index = int(box.cls)
-                    class_name = results[0].names[cls_index]
                     confidence = float(box.conf)
-                    xyxy = box.xyxy[0].tolist()
-                    print(f"[Camera {self.cam_index}] {class_name} {confidence:.2f} {xyxy}")
+                    if confidence > max_conf:
+                        max_conf = confidence
 
-            # Resize annotated frame to fit display
+            self.conf_label.config(text=f"Max Confidence: {max_conf*100:.1f}%")
+            self.status_canvas.itemconfig(self.status_circle, fill="red" if max_conf >= 0.85 else "green")
+
+            # Resize annotated frame to canvas size
             annotated = cv2.resize(annotated, (self.display_width, self.display_height))
             rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
             img = Image.fromarray(rgb)
-            imgtk = ImageTk.PhotoImage(image=img)
-            self.label.imgtk = imgtk
-            self.label.config(image=imgtk)
+            self.imgtk = ImageTk.PhotoImage(image=img)
 
-        self.label.after(15, self.update_frame)
+            if self.camera_canvas_img is None:
+                self.camera_canvas_img = self.camera_canvas.create_image(0, 0, anchor="nw", image=self.imgtk)
+            else:
+                self.camera_canvas.itemconfig(self.camera_canvas_img, image=self.imgtk)
+
+        # Schedule next frame (~30 FPS)
+        self.camera_canvas.after(33, self.update_frame)
 
     def terminate_print(self):
         if not self.printer_info:
@@ -116,11 +133,7 @@ class CameraTab:
             return
 
         url = f"http://{printer_ip}/api/job"
-        headers = {
-            "Content-Type": "application/json",
-            # Add your API key if needed:
-            # "X-Api-Key": "<YOUR_API_KEY>"
-        }
+        headers = {"Content-Type": "application/json"}
         payload = {"command": "cancel"}
 
         try:
@@ -174,7 +187,6 @@ class App:
         # Ask for printer info first
         def save_printer(name, ip):
             self.printers[cam_index] = {"name": name, "ip": ip}
-            print(f"[Camera {cam_index}] Printer saved: {self.printers[cam_index]}")
             CameraTab(self.notebook, cam_index, printer_info=self.printers[cam_index])
 
         PrinterConfigPopup(self.root, cam_index, save_printer)
@@ -191,7 +203,7 @@ if __name__ == "__main__":
 
     root = tk.Tk()
     root.title("YOLO Multi-Camera Viewer")
-    root.geometry("1000x800")
+    root.geometry("1200x800")
 
     app = App(root, camera_count)
 
