@@ -3,9 +3,16 @@ from tkinter import ttk
 import cv2
 from PIL import Image, ImageTk
 import sys
+from ultralytics import YOLO
+
+# -----------------------------
+# Load YOLO model ONCE
+# -----------------------------
+MODEL_PATH = "../weights/best.pt"
+model = YOLO(MODEL_PATH)
 
 # -------------------------------------------------------
-# Camera feed tab class
+# Camera feed tab class WITH YOLO
 # -------------------------------------------------------
 class CameraTab:
     def __init__(self, notebook, cam_index):
@@ -23,17 +30,34 @@ class CameraTab:
         self.update_frame()
 
     def update_frame(self):
-        # Read frame
         ret, frame = self.cap.read()
         if ret:
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(frame)
+            # Run YOLO on this frame
+            results = model.predict(frame, imgsz=640, verbose=False)
+
+            # Draw YOLO boxes on the image
+            annotated = results[0].plot()
+
+            # Print detections (same style as your old script)
+            if results[0].boxes:
+                for box in results[0].boxes:
+                    cls_index = int(box.cls)
+                    class_name = results[0].names[cls_index]
+                    confidence = float(box.conf)
+                    xyxy = box.xyxy[0].tolist()
+
+                    print(f"[Camera {self.cam_index}] {class_name} "
+                          f"{confidence:.2f} {xyxy}")
+
+            # Convert frame to display in Tkinter
+            rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(rgb)
             imgtk = ImageTk.PhotoImage(image=img)
             self.label.imgtk = imgtk
             self.label.config(image=imgtk)
 
         # Schedule next frame
-        self.label.after(15, self.update_frame)  # ~60 FPS
+        self.label.after(15, self.update_frame)
 
 # -------------------------------------------------------
 # Main App
@@ -82,7 +106,7 @@ if __name__ == "__main__":
     camera_count = int(sys.argv[1])
 
     root = tk.Tk()
-    root.title("Multi-Camera Viewer")
+    root.title("YOLO Multi-Camera Viewer")
     root.geometry("900x700")
 
     app = App(root, camera_count)
